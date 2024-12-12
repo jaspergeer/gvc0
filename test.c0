@@ -1,0 +1,40 @@
+struct List {
+  int car;
+  struct List *cdr;
+};
+
+struct _old_List {
+  int car;
+  struct List *cdr;
+  struct List *_old_cdr;
+};
+
+/*@ predicate list(struct List *xs) =
+    xs == NULL ? true : acc(xs->car) && acc(xs->cdr) && list(xs->cdr);
+@*/
+
+int main()
+  //@requires true;
+  //@ensures true;
+{
+  int x = 1;
+  return 0;
+}
+
+int sum(struct List *xs)
+  //@pure;
+  //@requires list(xs);
+  //@ensures true;
+{
+  //@unfold list(xs);
+  return 0;
+}
+
+int foo(struct List *foo, bool b)
+  //@requires ? && acc(foo->car);
+  //@ensures list(foo) && acc(foo->car) && old(foo->car) == sum(foo);
+{
+  int x = foo->car;
+  foo->car = foo->car + 1;
+  return 0;
+}

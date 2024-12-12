@@ -36,6 +36,7 @@ object SpecificationValidator {
 
       case member: ResolvedMember => validateField(member.parent, errors)
       case acc: ResolvedAccessibility => validateField(acc.field, errors)
+      case old: ResolvedOld => validateSpecification(old.body, errors)
       case deref: ResolvedDereference => validateField(deref.value, errors)
 
       case comp: ResolvedComparison => {
@@ -99,7 +100,7 @@ object SpecificationValidator {
            | _: ResolvedNull => ()
 
       case invoke: ResolvedInvoke => {
-        errors.error(value, "Invalid method call in specification value")
+        if (!invoke.method.exists(_.pure)) errors.error(value, "Invalid method call in specification value")
         invoke.arguments.foreach(validateValue(_, errors))
       }
 
@@ -116,6 +117,10 @@ object SpecificationValidator {
 
       case _: ResolvedAccessibility => {
         errors.error(value, "Invalid acc() expression used as a value")
+      }
+
+      case old: ResolvedOld => {
+        validateValue(old.body, errors)
       }
 
       case _: ResolvedImprecision => {

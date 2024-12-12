@@ -92,6 +92,7 @@ object Replacer {
     case v: IR.Var                  => replace(v, m)
     case member: IR.Member          => replace(member, m)
     case acc: IR.Accessibility      => new IR.Accessibility(replace(acc.member, m))
+    case old: IR.Old                => new IR.Old(replace(old.body, m))
     case pred: IR.PredicateInstance => replace(pred, m)
     case result: IR.Result          => result
     case imprecise: IR.Imprecise =>

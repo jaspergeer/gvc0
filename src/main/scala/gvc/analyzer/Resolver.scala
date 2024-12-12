@@ -417,6 +417,16 @@ object Resolver {
       case variable: VariableExpression =>
         resolveVariable(variable.variable, scope)
 
+      case old: OldExpression if context != MethodContext =>
+        ResolvedOld(old, resolveExpression(old.body, scope, context))
+
+      case old: OldExpression =>
+        scope.errors.error(
+          old,
+          "Old expressions cannot appear outside of specifications" ,
+        )
+        return ResolvedOld(old, resolveExpression(old.body, scope, context))
+
       case increment: IncrementExpression => {
         scope.errors.error(
           increment,
@@ -530,8 +540,7 @@ object Resolver {
         )
 
       case invoke: InvokeExpression if context != MethodContext => {
-        // Invokes in a specification must refer to a predicate
-        resolvePredicate(
+        resolveFuncLike(
           invoke,
           invoke.method,
           invoke.arguments,
@@ -705,7 +714,7 @@ object Resolver {
     }
   }
 
-  def resolveVariable(id: Identifier, scope: Scope): ResolvedExpression = {
+  def resolveVariable(id: Identifier, scope: Scope): ResolvedVariableRef = {
     val variable = scope.variables.get(id.name)
     if (!variable.isDefined) {
       scope.errors.error(id, "'" + id.name + "' is not defined")
@@ -764,6 +773,42 @@ object Resolver {
         scope.errors.error(other, "Invalid specification")
         None
       }
+    }
+  }
+
+  def resolveFuncLike(
+      parsed: Node,
+      id: Identifier,
+      args: List[Expression],
+      scope: Scope,
+      context: Context
+  ): ResolvedExpression = {
+    val name = id.name
+    val arguments = args.map(resolveExpression(_, scope, context))
+    if (scope.methodDeclarations.contains(name)) {
+      val method = scope.methodDeclarations.get(name)
+      if (!method.isDefined) {
+        scope.errors.error(id, s"'$name' is not declared")
+      }
+      if (!method.exists(_.pure)) {
+        scope.errors.error(id, s"'$name' is not pure")
+      }
+      ResolvedInvoke(
+        parsed = parsed,
+        method = method,
+        methodName = name,
+        arguments = arguments
+      )
+    } else if (scope.predicateDeclarations.contains(name)) {
+      resolvePredicate(parsed, id, args, scope, context)
+    } else {
+      scope.errors.error(id, s"'$name' is not declared")
+      ResolvedInvoke(
+        parsed = parsed,
+        method = None,
+        methodName = name,
+        arguments = arguments
+      )
     }
   }
 
@@ -852,6 +897,7 @@ object Resolver {
 
     val preconditions = ListBuffer[ResolvedExpression]()
     val postconditions = ListBuffer[ResolvedExpression]()
+    var isPure = false
     for (spec <- input.specifications) {
       spec match {
         case requires: RequiresSpecification =>
@@ -889,6 +935,9 @@ object Resolver {
           )
           scope.errors.error(unfold, "Invalid unfold")
         }
+        case pure: PureSpecification => {
+          isPure = true
+        }
       }
     }
 
@@ -898,7 +947,8 @@ object Resolver {
       returnType = retType,
       arguments = parameters,
       precondition = combineBooleans(preconditions.toSeq),
-      postcondition = combineBooleans(postconditions.toSeq)
+      postcondition = combineBooleans(postconditions.toSeq),
+      pure = isPure
     )
   }
 

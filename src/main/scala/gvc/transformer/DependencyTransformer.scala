@@ -35,7 +35,7 @@ object DependencyTransformer {
       val method = dependency.defineMethod(input.name, input.returnType match {
         case VoidType => None
         case t => Some(transformType(t))
-      })
+      }, input.pure)
 
       if (isNonTrivial(input.precondition) || isNonTrivial(input.postcondition))
         throw new TransformerException("Specification in library declarations are not implemented")

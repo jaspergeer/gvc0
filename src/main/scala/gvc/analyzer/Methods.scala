@@ -8,6 +8,7 @@ case class ResolvedMethodDeclaration(
     arguments: List[ResolvedVariable],
     precondition: Option[ResolvedExpression],
     postcondition: Option[ResolvedExpression],
+    pure: Boolean,
     library: Boolean = false,
 ) extends ResolvedNode
 

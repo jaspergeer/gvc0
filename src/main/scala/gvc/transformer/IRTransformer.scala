@@ -284,6 +284,7 @@ object IRTransformer {
         method.body,
         method.parameters.map(p => p.name -> p).toMap
       )
+      method.pure = input.declaration.pure
       method.precondition =
         input.declaration.precondition.map(transformSpec(_, scope))
           .orElse(Some(new IR.Imprecise(None)))
@@ -488,8 +489,11 @@ object IRTransformer {
     ): IR.Expression = input match {
       case ref: ResolvedVariableRef => scope.variable(ref)
       case pred: ResolvedPredicate  => transformPredicate(pred, scope)
+      case invoke: ResolvedInvoke if invoke.method.exists(_.pure)
+                                    => transformFunction(invoke, scope)
       case invoke: ResolvedInvoke   => invokeToValue(invoke, scope)
       case alloc: ResolvedAlloc     => allocToValue(alloc, scope)
+      case old: ResolvedOld         => new IR.Old(transformExpr(old.body, scope)) // TODO do we need to check scope?
 
       case m: ResolvedMember => {
         val (parent, field) = transformField(m)
@@ -688,6 +692,18 @@ object IRTransformer {
         .getOrElse(
           throw new TransformerException("Invalid predicate reference")
         )
+
+    def transformFunction(
+        invoke: ResolvedInvoke,
+        scope: Scope
+    ): IR.FunctionApplication = {
+      val method = resolveMethod(invoke)
+      if (!method.isPure) throw new TransformerException("Impure function called where pure function expected")
+      new IR.FunctionApplication(
+        method,
+        invoke.arguments.map(transformExpr(_, scope))
+      )
+    }
 
     def transformPredicate(
         pred: ResolvedPredicate,

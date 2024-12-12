@@ -400,7 +400,7 @@ object Main extends App {
     silicon.verify(silver) match {
       case verifier.Success => if (stopImmediately) silicon.stop()
       case verifier.Failure(errors) =>
-        val message = errors.map(_.readableMessage).mkString("\n")
+        val message = errors.map(_.readableMessage).mkString("\n") ++ "foobar"
         if (stopImmediately) silicon.stop()
         throw VerificationException(message)
     }

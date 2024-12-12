@@ -451,6 +451,7 @@ object Checker {
     impl.translateFieldPermission(field, List(mode), ValueContext)
   }
 
+  // TODO Jasper: we may be able to implement the data structure builder in a similar way
   def implementPredicateCheck(
       check: PredicatePermissionCheck,
       returnValue: Option[IR.Expression],
@@ -534,6 +535,8 @@ object Checker {
       case expr: CheckExpression =>
         Seq(
           new IR.Assert(
+            // Jasper: this seems important
+            // Is there a way to use the check context to add code at a previous location?
             expr.toIR(context.program, context.method, returnValue),
             IR.AssertKind.Imperative
           )

@@ -21,7 +21,7 @@ object Collector {
   ): CollectedProgram = {
     val checks = ViperChecks.collect(vprProgram)
 
-    val methods = irProgram.methods
+    val methods = irProgram.methods.filter(!_.pure)
       .map(
         m =>
           (

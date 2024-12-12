@@ -274,6 +274,10 @@ object TypeChecker {
         assertField(errors, acc.field)
       }
 
+      case old: ResolvedOld => {
+        checkExpression(errors, old.body)
+      }
+
       case _: ResolvedResult |
         _: ResolvedImprecision |
         _: ResolvedString |

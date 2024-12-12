@@ -1,5 +1,7 @@
 package gvc.transformer
+import viper.silver.ast.{NoInfo, NoPosition, NoTrafos}
 import viper.silver.{ast => vpr}
+
 import scala.collection.mutable
 
 case class SilverVarId(methodName: String, varName: String)
@@ -25,16 +27,18 @@ object IRSilver {
 
     def convert(): vpr.Program = {
       val predicates = ir.predicates.map(convertPredicate).toList
+      val methodLike = ir.methods.map(convertMethod)
       val methods = (
-        ir.methods.map(convertMethod) ++
+        methodLike.flatMap(_.left.toOption) ++
         ir.dependencies.flatMap(_.methods.map(convertLibraryMethod))
       ).toList
       val fields = this.fields.toSeq.sortBy(_.name).toList
+      val functions = methodLike.flatMap(_.right.toOption).toList
 
       val program = vpr.Program(
         Seq.empty,
         fields,
-        Seq.empty,
+        functions,
         predicates,
         methods,
         Seq.empty
@@ -66,8 +70,7 @@ object IRSilver {
       )()
     }
 
-    private def convertMethod(method: IR.Method): vpr.Method = {
-
+    private def convertMethod(method: IR.Method): Either[vpr.Method, vpr.Function] = {
       val params = method.parameters.map(convertDecl).toList
       val decls = method.variables.map(convertDecl).toList
       val ret = returnVarDecl(method.returnType)
@@ -75,14 +78,33 @@ object IRSilver {
       val post = method.postcondition.map(convertExpr).toSeq
       val body = method.body.flatMap(convertOp).toList
 
-      vpr.Method(
-        method.name,
-        params,
-        ret,
-        pre,
-        post,
-        Some(vpr.Seqn(body, decls)())
-      )()
+      if (method.pure) {
+        val bodyAsList = method.body.toList
+        // TODO Jasper: make this nicer
+        val ret = bodyAsList.last.asInstanceOf[IR.Return].value.map(convertExpr).get
+        val body = bodyAsList.take(bodyAsList.length - 1).foldRight(ret) {
+          (op: IR.Op, expr: vpr.Exp) => op match {
+            case uf: IR.Unfold => vpr.Unfolding(convertPredicateInstance(uf.instance), expr)()
+            case _ => throw new IRException(s"Expression ${op} unsupported in function body")
+          }
+        }
+        Right(vpr.Function(
+          method.name,
+          params,
+          convertType(method.returnType.get),
+          pre,
+          post,
+          Some(body)
+        )())
+      } else
+        Left(vpr.Method(
+          method.name,
+          params,
+          ret,
+          pre,
+          post,
+          Some(vpr.Seqn(body, decls)())
+        )())
     }
 
     def convertDecl(decl: IR.Var): vpr.LocalVarDecl = {
@@ -246,12 +268,23 @@ object IRSilver {
         vpr.FullPerm()()
       )()
 
+    def convertFunctionApplication(
+        fun: IR.FunctionApplication
+    ): vpr.FuncApp =
+      vpr.FuncApp(
+        fun.function.name,
+        fun.arguments.map(convertExpr)
+      )(NoPosition, NoInfo, convertType(fun.function.returnType.get), NoTrafos)
+
     def convertExpr(expr: IR.Expression): vpr.Exp = expr match {
       case v: IR.Var    => convertVar(v)
       case m: IR.Member => convertMember(m)
       case acc: IR.Accessibility =>
         vpr.FieldAccessPredicate(convertMember(acc.member), vpr.FullPerm()())()
+      case old: IR.Old =>
+        vpr.Old(convertExpr(old.body))()
       case pred: IR.PredicateInstance => convertPredicateInstance(pred)
+      case fun: IR.FunctionApplication => convertFunctionApplication(fun)
       case result: IR.Result          => getReturnVar(result.method)
       case imp: IR.Imprecise =>
         vpr.ImpreciseExp(

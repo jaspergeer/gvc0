@@ -34,6 +34,17 @@ object IRPrinter {
       printExpr(p, acc.member)
       p.print(")")
     }
+    case old: IR.Old => {
+      p.print("old(")
+      printExpr(p, old.body)
+      p.print(")")
+    }
+    case fun: IR.FunctionApplication => {
+      p.print(fun.function.name)
+      p.print("(")
+      printList(p, fun.arguments) { arg => printExpr(p, arg) }
+      p.print(")")
+    }
     case pred: IR.PredicateInstance => {
       p.print(pred.predicate.name)
       p.print("(")

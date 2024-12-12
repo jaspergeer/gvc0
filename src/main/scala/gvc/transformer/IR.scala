@@ -160,6 +160,7 @@ object IR {
     def name: String
     def returnType: Option[Type]
     def parameters: Seq[Parameter]
+    def isPure: Boolean
   }
 
   class Method(
@@ -167,6 +168,7 @@ object IR {
       var returnType: Option[Type],
       var precondition: Option[Expression] = None,
       var postcondition: Option[Expression] = None,
+      var pure: Boolean = false
   ) extends MethodDefinition {
     // Variables/parameters are added to both a list and a map to preserve order and speedup lookup
     // Scope is a map of both parameters and variables
@@ -176,6 +178,7 @@ object IR {
 
     var body = new MethodBlock(this)
 
+    def isPure: Boolean = pure
     def parameters: Seq[Parameter] = _parameters
     def variables: Seq[Var] = _variables
 
@@ -207,7 +210,7 @@ object IR {
         replacementPost: Option[Expression] = postcondition,
         replacementBody: List[Op] = body.toList
     ): Method = {
-      val copyOf = new Method(name, returnType, replacementPre, replacementPost)
+      val copyOf = new Method(name, returnType, replacementPre, replacementPost, pure)
       _variables.foreach(v => copyOf.addVar(v.varType, v.name))
       _parameters.foreach(p => copyOf.addParameter(p.varType, p.name))
       scope.foreach(entry => {
@@ -447,6 +450,16 @@ object IR {
 
   }
 
+  class FunctionApplication(
+     var function: MethodDefinition,
+     var arguments: List[IR.Expression]
+  ) extends SpecificationExpression {
+    override def contains(exp: Expression) =
+      super.contains(exp) || arguments.exists(_.contains(exp))
+    override def toString() =
+      function.name + "(" + arguments.map(IRPrinter.print).mkString(", ") + ")"
+  }
+
   class PredicateInstance(
       var predicate: Predicate,
       var arguments: List[IR.Expression]
@@ -455,6 +468,11 @@ object IR {
       super.contains(exp) || arguments.exists(_.contains(exp))
     override def toString() =
       predicate.name + "(" + arguments.map(IRPrinter.print).mkString(", ") + ")"
+  }
+
+  // "old" expressions in a specification
+  class Old(var body: Expression) extends SpecificationExpression {
+    override def valueType: Option[Type] = body.valueType
   }
 
   // Represents a \result expression in a specification
@@ -796,7 +814,8 @@ object IR {
 
     def defineMethod(
         name: String,
-        returnType: Option[Type]
+        returnType: Option[Type],
+        pure: Boolean
     ): DependencyMethod = {
       if (program._methods.contains(name)) {
         throw new IRException(
@@ -804,7 +823,7 @@ object IR {
         )
       }
 
-      val method = new DependencyMethod(name, returnType)
+      val method = new DependencyMethod(name, returnType, pure)
       program._methods += method.name -> method
       _methods += method
       method
@@ -847,11 +866,14 @@ object IR {
 
   class DependencyMethod(
       val name: String,
-      val returnType: Option[Type]
+      val returnType: Option[Type],
+      val pure: Boolean
   ) extends MethodDefinition {
     val _parameters = mutable.ListBuffer[Parameter]()
 
     def parameters: Seq[Parameter] = _parameters
+
+    def isPure: Boolean = pure
 
     def addParameter(name: String, valueType: Type): Parameter = {
       val param = new Parameter(valueType, name)

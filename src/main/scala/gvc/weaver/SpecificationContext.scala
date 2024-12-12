@@ -7,6 +7,8 @@ abstract class SpecificationContext {
   def convert(v: IR.Var): IR.Expression
   def convert(r: IR.Result): IR.Expression
 
+  def convert(o: IR.Old): IR.Expression =
+    new IR.Old(convert(o.body))
   def convert(f: IR.FieldMember): IR.FieldMember =
     new IR.FieldMember(convert(f.root), f.field)
   def convert(d: IR.DereferenceMember): IR.DereferenceMember =
@@ -28,6 +30,7 @@ abstract class SpecificationContext {
 
   def convert(expr: IR.Expression): IR.Expression = {
     expr match {
+      case o: IR.Old => convert(o)
       case v: IR.Var => convert(v)
       case f: IR.FieldMember => convert(f)
       case d: IR.DereferenceMember => convert(d)
@@ -66,7 +69,7 @@ object IdentityContext extends SpecificationContext {
 class PredicateContext(pred: IR.Predicate, params: Map[IR.Var, IR.Expression])
     extends SpecificationContext {
   def convert(source: IR.Result): IR.Expression =
-    throw new WeaverException(s"Invalid \result expression in '${pred.name}'")
+    throw new WeaverException(s"Invalid \\result expression in '${pred.name}'")
 
   def convert(source: IR.Var): IR.Expression =
     params.getOrElse(

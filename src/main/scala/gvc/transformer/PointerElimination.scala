@@ -14,6 +14,7 @@ object PointerElimination {
 
     def convert(expr: IR.Expression): IR.Expression = expr match {
       case a: IR.Accessibility => new IR.Accessibility(convertMember(a.member))
+      case o: IR.Old => new IR.Old(convert(o.body))
       case b: IR.Binary => new IR.Binary(b.operator, convert(b.left), convert(b.right))
       case c: IR.Conditional => new IR.Conditional(convert(c.condition), convert(c.ifTrue), convert(c.ifFalse))
       case i: IR.Imprecise => new IR.Imprecise(i.precise.map(convert))
@@ -23,6 +24,7 @@ object PointerElimination {
       case u: IR.Unary => new IR.Unary(u.operator, convert(u.operand))
       case v: IR.Var => v
       case l: IR.Literal => l
+      case c: IR.FunctionApplication => new IR.FunctionApplication(c.function, c.arguments.map(convert))
     }
 
     def convertBlock(block: IR.Block): Unit = {

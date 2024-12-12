@@ -118,6 +118,7 @@ trait Expressions extends Types {
     lengthExpression |
     imprecisionExpression |
     accessibilityExpression |
+    oldExpression |
     allocExpression |
     allocArrayExpression |
     invokeExpression |
@@ -183,6 +184,11 @@ trait Expressions extends Types {
   def parseChar(raw: String): Char = {
     parseString(raw)(0)
   }
+
+  def oldExpression[_: P]: P[OldExpression] =
+    P(span(kw("old") ~ "(" ~ expression ~ ")")).map({
+      case (body, span) => OldExpression(body, span)
+    })
 
   def allocExpression[_: P]: P[AllocExpression] =
     P(span(kw("alloc") ~ "(" ~ typeReference ~ ")")).map({

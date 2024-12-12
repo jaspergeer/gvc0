@@ -17,6 +17,13 @@ case class ResolvedVariableRef(
   def isMissing = variable.isEmpty
 }
 
+case class ResolvedOld(
+  parsed: Node,
+  body: ResolvedExpression
+) extends ResolvedExpression {
+  def valueType = body.valueType
+}
+
 case class ResolvedPredicate(
   parsed: Node,
   predicate: Option[ResolvedPredicateDeclaration],

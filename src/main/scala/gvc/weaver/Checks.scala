@@ -256,6 +256,12 @@ object CheckExpression {
     def value = false
   }
 
+  case class FuncApp(fun: String, args: Seq[Expr]) extends Expr {
+    def toIR(p: IR.Program, m: IR.Method, r: Option[IR.Expression]) =
+      new IR.FunctionApplication(p.method(fun), args.map(_.toIR(p, m, r)).toList)
+    def guard = args.map(Some(_)).foldRight(None.asInstanceOf[Option[CheckExpression]])(and)
+  }
+
   case class Cond(cond: Expr, ifTrue: Expr, ifFalse: Expr) extends Expr {
     def toIR(p: IR.Program, m: IR.Method, r: Option[IR.Expression]) =
       new IR.Conditional(
@@ -301,6 +307,7 @@ object CheckExpression {
       case _: IR.ArrayMember | _: IR.Accessibility | _: IR.PredicateInstance |
           _: IR.Imprecise =>
         throw new WeaverException("Invalid expression used as value in spec")
+      case o: IR.Old => throw new WeaverException("irValue") // TODO how do we pull out the old value?
       case n: IR.Var => Var(n.name)
       case n: IR.FieldMember =>
         Field(irValue(n.root), n.field.struct.name, n.field.name)
@@ -365,8 +372,12 @@ object CheckExpression {
           case x      => Not(x)
         }
 
+      case fun: vpr.FuncApp => {
+        FuncApp(fun.funcname, fun.args.map(fromViper))
+      }
+
       case access: vpr.FieldAccess => {
-        val root = fromViper(access.rcv)
+        val root = fromViper(access.rcv) // TODO for an old-heap dependent access, this should be invoked with some flag
         access.field.name match {
           case field => {
             val segments = field.split('.')
@@ -394,6 +405,8 @@ object CheckExpression {
           case IRSilver.Names.RenamedResult => Var(IRSilver.Names.ReservedResult)
           case id => Var(id)
         }
+
+      case o: vpr.OldExp => throw new WeaverException("fromViper")// TODO
 
       case lit: vpr.BoolLit => if (lit.value) TrueLit else FalseLit
       case lit: vpr.IntLit =>
