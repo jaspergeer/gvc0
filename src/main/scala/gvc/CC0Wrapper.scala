@@ -61,6 +61,7 @@ object CC0Wrapper {
   def exec(sourceFile: String, options: CC0Options): Int = {
     val os = new ByteArrayOutputStream
     val command = formatCommand(sourceFile, options)
+    println(command.mkString(" "))
     val exitCode = (command #> os) !
 
     exitCode

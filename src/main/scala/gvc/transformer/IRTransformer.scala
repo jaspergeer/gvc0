@@ -17,9 +17,14 @@ object IRTransformer {
     def transform(): IR.Program = {
       for (dep <- program.dependencies)
         defineDependency(dep)
-      for (struct <- program.structDefinitions)
+      for (struct <- program.structDefinitions) {
         implementStruct(struct)
-
+        implementOldStruct(struct)
+      }
+      for ((name, struct) <- structs)
+        if (!name.startsWith("_old_")) defineOldStructBuilder(name, struct)
+      for ((name, struct) <- structs)
+        if (!name.startsWith("_old_")) implementOldStructBuilder(name, struct)
       for (predicate <- program.predicateDefinitions)
         definePredicate(predicate)
       for (predicate <- program.predicateDefinitions)
@@ -31,6 +36,7 @@ object IRTransformer {
       ir
     }
 
+    private val originalStructs = mutable.Map[String, StructLayout]()
     // Data for struct flattening (i.e. embedding a value-type struct
     // within another struct by copying the list of fields)
     private val structs = mutable.Map[String, StructLayout]()
@@ -73,6 +79,120 @@ object IRTransformer {
           }
         }
       }
+    }
+
+    def defineOldStructBuilder(name: String, layout: StructLayout): Unit = {
+      val method = ir.addMethod(
+        "_build_old_" ++ name,
+        Some(new IR.ReferenceType(ir.struct("_old_" ++ name)))
+      )
+      method.addParameter(new IR.ReferenceType(ir.struct(name)), "curr")
+    }
+
+    def implementOldStructBuilder(name: String, layout: StructLayout): Unit = {
+      val oldName = "_old_" ++ name
+      val structType = new IR.ReferenceType(ir.struct(name))
+      val oldStructType = new IR.ReferenceType(ir.struct(oldName))
+      val method = ir.method("_build_old_" ++ name) match {
+        case method: IR.Method => method
+        case method =>
+          throw new TransformerException(s"Invalid method '${method.name}'")
+      }
+      method.precondition = Some(new IR.Imprecise(None))
+
+      val scope = new BlockScope(
+        method,
+        method.body,
+        method.parameters.map(p => p.name -> p).toMap
+      )
+
+      val curr = new IR.Var(structType, "curr")
+      val next = method.addVar(oldStructType, "next")
+      scope += new IR.AllocStruct(ir.struct(oldName), next)
+
+      val struct = ir.struct(name)
+      val oldStruct = ir.struct(oldName)
+      struct.fields.foreach {
+        field => field.valueType match {
+          case ref: IR.ReferenceType => {
+            val oldField = oldStruct.fields.find(_.name == field.name).get
+            val oldPtrField = oldStruct.fields.find(_.name == "_old_" ++ field.name).get
+            println(oldField.valueType.name)
+            val temp = scope.method.addVar(oldField.valueType)
+            scope +=
+              new IR.Invoke(
+                ir.method("_build_old_" ++ ref.struct.name),
+                List(new IR.FieldMember(curr, field)),
+                Some(temp)
+              )
+            scope += new IR.AssignMember(new IR.FieldMember(next, oldField), temp)
+            scope += new IR.AssignMember(new IR.FieldMember(next, oldPtrField), new IR.FieldMember(curr, field))
+          }
+          case valueType => {
+            val oldField = oldStruct.fields.find(_.name == field.name).get
+            scope += new IR.AssignMember(new IR.FieldMember(next, oldField), new IR.FieldMember(curr, field))
+          }
+        }
+      }
+      scope += new IR.Return(Some(next))
+    }
+
+    def implementOldStruct(input: ResolvedStructDefinition): Unit = {
+      val oldName = "_old_" ++ input.name
+      val oldStruct = ir.struct(oldName) match {
+        case struct: IR.Struct => struct
+        case struct =>
+          throw new TransformerException(s"Invalid struct '${struct.name}")
+      }
+
+      def resolvePtrField(
+                        field: ResolvedStructField,
+                      ): Option[StructItem] = {
+        val fullName = "_old_" ++ field.name
+
+        field.valueType match {
+          case ResolvedPointer(ResolvedStructType(structName)) =>
+            Some(new StructValue(oldStruct.addField(fullName, new IR.ReferenceType(Some(ir.struct(structName)).value))))
+          case _ => None
+        }
+      }
+
+      def resolveField(
+                        field: ResolvedStructField,
+                        base: Option[String]
+                      ): StructItem = {
+        val fullName = base match {
+          case Some(n) => n + "_" + field.name
+          case None    => field.name
+        }
+
+        field.valueType match {
+          case ResolvedStructType(structName) =>
+            new StructEmbedding(
+              structDefs
+                .get(structName)
+                .getOrElse(
+                  throw new TransformerException(
+                    s"Undefined struct type '$structName'"
+                  )
+                )
+                .fields
+                .map(f => f.name -> resolveField(f, Some(fullName)))
+                .toMap
+            )
+          case ResolvedPointer(ResolvedStructType(structName)) =>
+              new StructValue(oldStruct.addField(fullName, new IR.ReferenceType(Some(ir.struct("_old_" ++ structName)).value)))
+          case valueType =>
+            new StructValue(oldStruct.addField(fullName, transformType(valueType)))
+        }
+      }
+
+      structs += oldName -> new StructLayout(
+        (input.fields.map(f => f.name -> resolveField(f, None)) ++
+          input.fields.flatMap(f => resolvePtrField(f).map(f.name -> _))
+          ).toMap,
+        oldStruct
+      )
     }
 
     def implementStruct(input: ResolvedStructDefinition): Unit = {
