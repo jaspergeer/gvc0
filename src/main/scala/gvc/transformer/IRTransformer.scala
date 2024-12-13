@@ -36,7 +36,6 @@ object IRTransformer {
       ir
     }
 
-    private val originalStructs = mutable.Map[String, StructLayout]()
     // Data for struct flattening (i.e. embedding a value-type struct
     // within another struct by copying the list of fields)
     private val structs = mutable.Map[String, StructLayout]()
@@ -112,12 +111,12 @@ object IRTransformer {
 
       val struct = ir.struct(name)
       val oldStruct = ir.struct(oldName)
+
       struct.fields.foreach {
         field => field.valueType match {
           case ref: IR.ReferenceType => {
             val oldField = oldStruct.fields.find(_.name == field.name).get
             val oldPtrField = oldStruct.fields.find(_.name == "_old_" ++ field.name).get
-            println(oldField.valueType.name)
             val temp = scope.method.addVar(oldField.valueType)
             scope +=
               new IR.Invoke(
@@ -128,7 +127,8 @@ object IRTransformer {
             scope += new IR.AssignMember(new IR.FieldMember(next, oldField), temp)
             scope += new IR.AssignMember(new IR.FieldMember(next, oldPtrField), new IR.FieldMember(curr, field))
           }
-          case valueType => {
+          // TODO Jasper: this probably doesn't do the right thing for pointers to primitive types
+          case _ => {
             val oldField = oldStruct.fields.find(_.name == field.name).get
             scope += new IR.AssignMember(new IR.FieldMember(next, oldField), new IR.FieldMember(curr, field))
           }
@@ -146,8 +146,8 @@ object IRTransformer {
       }
 
       def resolvePtrField(
-                        field: ResolvedStructField,
-                      ): Option[StructItem] = {
+                           field: ResolvedStructField,
+                         ): Option[StructItem] = {
         val fullName = "_old_" ++ field.name
 
         field.valueType match {
@@ -156,7 +156,6 @@ object IRTransformer {
           case _ => None
         }
       }
-
       def resolveField(
                         field: ResolvedStructField,
                         base: Option[String]
@@ -404,7 +403,25 @@ object IRTransformer {
         method.body,
         method.parameters.map(p => p.name -> p).toMap
       )
+
       method.pure = input.declaration.pure
+
+      if (!method.pure)
+        scope.vars.foreach {
+          case (name, v) => v.varType match {
+            case ref: IR.ReferenceType =>
+              val old = method.addVar(new IR.ReferenceType(ir.struct("_old_" ++ ref.struct.name)), "_old_" ++ name)
+              scope +=
+                new IR.Invoke(
+                  ir.method("_build_old_" ++ ref.struct.name),
+                  List(v),
+                  Some(old)
+                )
+            case _ => {}
+          }
+          case _ => {}
+        }
+
       method.precondition =
         input.declaration.precondition.map(transformSpec(_, scope))
           .orElse(Some(new IR.Imprecise(None)))
@@ -412,6 +429,13 @@ object IRTransformer {
       method.postcondition =
         input.declaration.postcondition.map(transformSpec(_, scope))
           .orElse(Some(new IR.Imprecise(None)))
+
+//      method.precondition match {
+//        case Some(_: IR.Imprecise) => {
+//          // TODO Jasper: identify the set of accessibility predicates that
+//          //  the old(...) expressions in the postcondition require
+//        }
+//      }
 
       ReturnSimplification.transform(method)
       ReassignmentElimination.transform(method)
