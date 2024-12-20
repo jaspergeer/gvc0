@@ -29,6 +29,13 @@ object IRPrinter {
         p.print("*")
         printExpr(p, deref.root, Precedence.Unary)
       }
+    case acc: IR.RuntimeAccessibility => {
+      p.print("runtime_query(_ownedFields, ")
+      printExpr(p, acc.structInstance)
+      p.print("->_id, ")
+      printExpr(p, acc.fieldIndex)
+      p.print(")")
+    }
     case acc: IR.Accessibility => {
       p.print("acc(")
       printExpr(p, acc.member)

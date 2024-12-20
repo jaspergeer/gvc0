@@ -335,7 +335,7 @@ object Collector {
         val conditionLocation =
           normalizeLocation(ViperLocation.forIR(irLoc, position))
         val (expr, flag) =
-          unwrap(CheckExpression.fromViper(b.condition))
+          unwrap(CheckExpression.fromViper(b.condition, RValue()))
 
         val unwrappedCondition: Condition =
           if (conditionLocation == normalizeLocation(location)) {

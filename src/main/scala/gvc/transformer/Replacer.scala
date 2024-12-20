@@ -95,6 +95,8 @@ object Replacer {
     case old: IR.Old                => new IR.Old(replace(old.body, m))
     case pred: IR.PredicateInstance => replace(pred, m)
     case result: IR.Result          => result
+    case funapp: IR.FunctionApplication =>
+      new IR.FunctionApplication(funapp.function, funapp.arguments.map(replace(_, m)))
     case imprecise: IR.Imprecise =>
       new IR.Imprecise(imprecise.precise.map(replace(_, m)))
     case literal: IR.Literal => literal

@@ -444,6 +444,12 @@ object IR {
     def valueType: Option[Type] = None
   }
 
+  class RuntimeAccessibility(var structInstance: Expression, var fieldIndex: Expression) extends SpecificationExpression {
+    override def contains(exp: Expression) =
+      super.contains(exp) || structInstance.contains(exp) || fieldIndex.contains(exp)
+
+  }
+
   class Accessibility(var member: Member) extends SpecificationExpression {
     override def contains(exp: Expression) =
       super.contains(exp) || member.contains(exp)

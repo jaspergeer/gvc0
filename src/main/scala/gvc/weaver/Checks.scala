@@ -6,14 +6,15 @@ import gvc.transformer.{IR, IRSilver}
 sealed trait Check
 
 sealed trait ConvertContext
-case class StoreDependent() extends ConvertContext
-case class HeapDependent() extends ConvertContext
+case class LValue() extends ConvertContext
+case class RValue() extends ConvertContext
+case class Binding() extends ConvertContext
 
 object Check {
   def fromViper(check: vpr.Exp): Check = {
     check match {
       case fieldAccess: vpr.FieldAccessPredicate =>
-        CheckExpression.fromViper(fieldAccess.loc) match {
+        CheckExpression.fromViper(fieldAccess.loc, LValue()) match {
           case field: CheckExpression.Field => FieldAccessibilityCheck(field)
           case _ =>
             throw new WeaverException(
@@ -25,7 +26,7 @@ object Check {
         PredicateAccessibilityCheck(
           predicate.predicateName,
           predicate.args
-            .map(CheckExpression.fromViper(_))
+            .map(CheckExpression.fromViper(_, Binding()))
             .toList
         )
 
@@ -33,7 +34,7 @@ object Check {
         Check.fromViper(predicateAccess.loc)
 
       case _ =>
-        CheckExpression.fromViper(check)
+        CheckExpression.fromViper(check, RValue())
     }
   }
 }
@@ -353,7 +354,7 @@ object CheckExpression {
 
   def fromViper(
       value: vpr.Exp,
-      ctx: ConvertContext = StoreDependent(),
+      ctx: ConvertContext,
       old: Boolean = false
   ): Expr = {
     def isRefType(typ: vpr.Type) = typ match {
@@ -361,39 +362,40 @@ object CheckExpression {
       case _ => false
     }
     println(value)
-    def recur(value: vpr.Exp) = fromViper(value, StoreDependent(), old)
+    def recurOp(value: vpr.Exp) = fromViper(value, RValue(), old)
     value match {
-      case eq: vpr.EqCmp  => Eq(recur(eq.left), recur(eq.right))
-      case ne: vpr.NeCmp  => Not(Eq(recur(ne.left), recur(ne.right)))
-      case lt: vpr.LtCmp  => Lt(recur(lt.left), recur(lt.right))
-      case lte: vpr.LeCmp => LtEq(recur(lte.left), recur(lte.right))
-      case gt: vpr.GtCmp  => Gt(recur(gt.left), recur(gt.right))
-      case gte: vpr.GeCmp => GtEq(recur(gte.left), recur(gte.right))
+      case eq: vpr.EqCmp  => Eq(recurOp(eq.left), recurOp(eq.right))
+      case ne: vpr.NeCmp  => Not(Eq(recurOp(ne.left), recurOp(ne.right)))
+      case lt: vpr.LtCmp  => Lt(recurOp(lt.left), recurOp(lt.right))
+      case lte: vpr.LeCmp => LtEq(recurOp(lte.left), recurOp(lte.right))
+      case gt: vpr.GtCmp  => Gt(recurOp(gt.left), recurOp(gt.right))
+      case gte: vpr.GeCmp => GtEq(recurOp(gte.left), recurOp(gte.right))
 
-      case and: vpr.And => And(recur(and.left), recur(and.right))
-      case or: vpr.Or   => Or(recur(or.left), recur(or.right))
+      case and: vpr.And => And(recurOp(and.left), recurOp(and.right))
+      case or: vpr.Or   => Or(recurOp(or.left), recurOp(or.right))
 
-      case add: vpr.Add => Add(recur(add.left), recur(add.right))
-      case sub: vpr.Sub => Sub(recur(sub.left), recur(sub.right))
-      case mul: vpr.Mul => Mul(recur(mul.left), recur(mul.right))
-      case div: vpr.Div => Div(recur(div.left), recur(div.right))
+      case add: vpr.Add => Add(recurOp(add.left), recurOp(add.right))
+      case sub: vpr.Sub => Sub(recurOp(sub.left), recurOp(sub.right))
+      case mul: vpr.Mul => Mul(recurOp(mul.left), recurOp(mul.right))
+      case div: vpr.Div => Div(recurOp(div.left), recurOp(div.right))
 
-      case minus: vpr.Minus => Neg(recur(minus.exp))
+      case minus: vpr.Minus => Neg(recurOp(minus.exp))
       case not: vpr.Not =>
-        recur(not.exp) match {
+        recurOp(not.exp) match {
           case Not(f) => f
           case x      => Not(x)
         }
 
       case fun: vpr.FuncApp => {
-        FuncApp(fun.funcname, fun.args.map(fromViper(_, HeapDependent(), old)))
+        FuncApp(fun.funcname, fun.args.map(fromViper(_, Binding(), old)))
       }
 
-      case access: vpr.FieldAccess if ctx == StoreDependent() && old && isRefType(access.field.typ) => {
-        println("access")
-        println(access.field)
+      case access: vpr.FieldAccess
+        if ctx == RValue()
+          && old
+          && isRefType(access.field.typ) => {
         // return pointer
-        val root = fromViper(access.rcv, HeapDependent(), old)
+        val root = fromViper(access.rcv, RValue(), old)
         access.field.name match {
           case field => {
             val segments = field.split('.')
@@ -419,7 +421,7 @@ object CheckExpression {
       case access: vpr.FieldAccess => {
         println(access)
         println(access.field)
-        val root = fromViper(access.rcv, HeapDependent(), old)
+        val root = fromViper(access.rcv, LValue(), old)
         access.field.name match {
           case field => {
             val segments = field.split('.')
@@ -443,7 +445,7 @@ object CheckExpression {
 
       case o: vpr.Old => fromViper(o.exp, ctx, old = true)
 
-      case v: vpr.LocalVar if ctx == HeapDependent() && old =>
+      case v: vpr.LocalVar if ctx == LValue() && old =>
         v.name match {
           case IRSilver.Names.ReturnVar => Result
           case IRSilver.Names.RenamedResult => Var(IRSilver.Names.ReservedResult)

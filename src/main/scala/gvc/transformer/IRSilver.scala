@@ -279,6 +279,8 @@ object IRSilver {
     def convertExpr(expr: IR.Expression): vpr.Exp = expr match {
       case v: IR.Var    => convertVar(v)
       case m: IR.Member => convertMember(m)
+      case _: IR.RuntimeAccessibility=>
+        vpr.BoolLit(b = true)()
       case acc: IR.Accessibility =>
         vpr.FieldAccessPredicate(convertMember(acc.member), vpr.FullPerm()())()
       case old: IR.Old =>

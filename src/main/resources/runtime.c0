@@ -293,6 +293,11 @@ void runtime_assert(OwnedFields* fields, int id, int fieldIndex, string errorMes
   }
 }
 
+bool runtime_query(OwnedFields* fields, int id, int fieldIndex) {
+  FieldArray* entry = runtime_find(fields, id);
+  return entry == NULL || !entry->contents[fieldIndex];
+}
+
 bool runtime_tryRemove(OwnedFields* fields, int id, int fieldIndex) {
   FieldArray* entry = runtime_find(fields, id);
   if (entry == NULL || !entry->contents[fieldIndex]) {

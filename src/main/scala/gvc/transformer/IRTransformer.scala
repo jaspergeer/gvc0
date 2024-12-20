@@ -4,6 +4,11 @@ import gvc.analyzer._
 
 class TransformerException(message: String) extends Exception(message)
 
+sealed trait TransformContext
+case class LValue() extends TransformContext
+case class RValue() extends TransformContext
+case class Binding() extends TransformContext
+
 object IRTransformer {
   def transform(input: ResolvedProgram): IR.Program = {
     var p = new Transformer(input).transform()
@@ -17,14 +22,15 @@ object IRTransformer {
     def transform(): IR.Program = {
       for (dep <- program.dependencies)
         defineDependency(dep)
+      defineImplementAssumeImprecise()
       for (struct <- program.structDefinitions) {
         implementStruct(struct)
         implementOldStruct(struct)
       }
       for ((name, struct) <- structs)
-        if (!name.startsWith("_old_")) defineOldStructBuilder(name, struct)
+        if (!name.startsWith("_old_")) { defineOldStructBuilder(name, struct) }
       for ((name, struct) <- structs)
-        if (!name.startsWith("_old_")) implementOldStructBuilder(name, struct)
+        if (!name.startsWith("_old_")) { implementOldStructBuilder(name, struct) }
       for (predicate <- program.predicateDefinitions)
         definePredicate(predicate)
       for (predicate <- program.predicateDefinitions)
@@ -33,6 +39,8 @@ object IRTransformer {
         defineMethod(method)
       for (method <- program.methodDefinitions)
         implementMethod(method)
+      for (method <- program.methodDefinitions)
+        if (method.declaration.pure) { implementSnapshotFunction(method) }
       ir
     }
 
@@ -67,6 +75,15 @@ object IRTransformer {
         with StructItem
     class StructValue(val field: IR.StructField) extends StructItem
 
+    def defineImplementAssumeImprecise(): Unit = {
+      val method = ir.addMethod(
+        "_assume_imprecise_",
+        None
+      )
+      method.precondition = Some(new IR.BoolLit(true))
+      method.postcondition = Some(new IR.Imprecise(None))
+    }
+
     def defineDependency(declaration: ResolvedUseDeclaration): Unit = {
       if (declaration.isLibrary && !ir.dependencies.exists(
             _.path == declaration.name)) {
@@ -97,7 +114,8 @@ object IRTransformer {
         case method =>
           throw new TransformerException(s"Invalid method '${method.name}'")
       }
-      method.precondition = Some(new IR.Imprecise(None))
+      method.precondition = Some(new IR.BoolLit(true))
+      method.postcondition = Some(new IR.BoolLit(true))
 
       val scope = new BlockScope(
         method,
@@ -105,36 +123,51 @@ object IRTransformer {
         method.parameters.map(p => p.name -> p).toMap
       )
 
-      val curr = new IR.Var(structType, "curr")
+      scope += new IR.Invoke(ir.method("_assume_imprecise_"), List(), None)
+
+      val curr = method.parameters.find(_.name == "curr").get
       val next = method.addVar(oldStructType, "next")
       scope += new IR.AllocStruct(ir.struct(oldName), next)
 
       val struct = ir.struct(name)
       val oldStruct = ir.struct(oldName)
 
+      val nullCheck = new IR.If(new IR.Binary(IR.BinaryOp.Equal, curr, new IR.NullLit()))
+      scope += nullCheck
+      nullCheck.ifTrue += new IR.Return(Some(new IR.NullLit()))
+
+      val nonNullBlock = nullCheck.ifFalse
+
       struct.fields.foreach {
-        field => field.valueType match {
-          case ref: IR.ReferenceType => {
-            val oldField = oldStruct.fields.find(_.name == field.name).get
-            val oldPtrField = oldStruct.fields.find(_.name == "_old_" ++ field.name).get
-            val temp = scope.method.addVar(oldField.valueType)
-            scope +=
-              new IR.Invoke(
-                ir.method("_build_old_" ++ ref.struct.name),
-                List(new IR.FieldMember(curr, field)),
-                Some(temp)
-              )
-            scope += new IR.AssignMember(new IR.FieldMember(next, oldField), temp)
-            scope += new IR.AssignMember(new IR.FieldMember(next, oldPtrField), new IR.FieldMember(curr, field))
+        (field: IR.StructField) =>
+          val fieldIndex = new IR.IntLit(struct.fields.indexWhere(
+            f => f.name == field.name && f.valueType == field.valueType))
+          val permCheck = new IR.If(new IR.RuntimeAccessibility(curr, fieldIndex))
+          nonNullBlock += permCheck
+
+          val hasPermBlock = permCheck.ifTrue
+          field.valueType match {
+            case ref: IR.ReferenceType => {
+              val oldField = oldStruct.fields.find(_.name == field.name).get
+              val oldPtrField = oldStruct.fields.find(_.name == "_old_" ++ field.name).get
+              val temp = hasPermBlock.method.addVar(oldField.valueType)
+              hasPermBlock +=
+                new IR.Invoke(
+                  ir.method("_build_old_" ++ ref.struct.name),
+                  List(new IR.FieldMember(curr, field)),
+                  Some(temp)
+                )
+              hasPermBlock += new IR.AssignMember(new IR.FieldMember(next, oldField), temp)
+              hasPermBlock += new IR.AssignMember(new IR.FieldMember(next, oldPtrField), new IR.FieldMember(curr, field))
+            }
+            // TODO Jasper: this probably doesn't do the right thing for pointers to primitive types
+            case _ => {
+              val oldField = oldStruct.fields.find(_.name == field.name).get
+              hasPermBlock += new IR.AssignMember(new IR.FieldMember(next, oldField), new IR.FieldMember(curr, field))
+            }
           }
-          // TODO Jasper: this probably doesn't do the right thing for pointers to primitive types
-          case _ => {
-            val oldField = oldStruct.fields.find(_.name == field.name).get
-            scope += new IR.AssignMember(new IR.FieldMember(next, oldField), new IR.FieldMember(curr, field))
-          }
-        }
       }
-      scope += new IR.Return(Some(next))
+      nonNullBlock += new IR.Return(Some(next))
     }
 
     def implementOldStruct(input: ResolvedStructDefinition): Unit = {
@@ -273,23 +306,37 @@ object IRTransformer {
     // Looks up the correct field (including skipping flattened member expressions), and returns
     // the parent expression and the IR field.
     private def transformField(
-        member: ResolvedMember
+        member: ResolvedMember,
+        ctx: TransformContext,
+        useSnapshot: Boolean = false
     ): (ResolvedExpression, IR.StructField) = {
-      val (parent, item) = getStructItem(member)
-      item match {
-        case _: StructEmbedding =>
-          throw new TransformerException("Invalid access of embedded struct")
-        case value: StructValue => (parent, value.field)
+      if (useSnapshot) {
+        val name = if (ctx == RValue()) {
+            member.valueType match {
+              case _: ResolvedPointer => "_old_" ++ member.fieldName
+              case _ => member.fieldName
+            }
+          } else { member.fieldName }
+        val snapshotField = ir.struct("_old_" ++ member.field.get.structName).fields.find(f => f.name == name).get
+        val (parent, _) = getStructItem(member)
+        (parent, snapshotField)
+      } else {
+        val (parent, item) = getStructItem(member)
+        item match {
+          case _: StructEmbedding =>
+            throw new TransformerException("Invalid access of embedded struct")
+          case value: StructValue => (parent, value.field)
+        }
       }
     }
 
-    def transformReturnType(t: ResolvedType): Option[IR.Type] =
+    def transformReturnType(t: ResolvedType, useSnapshot: Boolean = false): Option[IR.Type] =
       t match {
         case VoidType => None
-        case t        => Some(transformType(t))
+        case t        => Some(transformType(t, useSnapshot))
       }
 
-    def transformType(t: ResolvedType): IR.Type =
+    def transformType(t: ResolvedType, useSnapshot: Boolean = false): IR.Type =
       t match {
         case UnknownType => throw new TransformerException("Unknown type")
         case MissingNamedType(name) =>
@@ -298,10 +345,12 @@ object IRTransformer {
           throw new TransformerException(
             s"Invalid bare struct value '$structName'"
           )
+        case ResolvedPointer(struct: ResolvedStructType) if useSnapshot =>
+          new IR.ReferenceType(ir.struct("_old_" ++ struct.structName))
         case ResolvedPointer(struct: ResolvedStructType) =>
           new IR.ReferenceType(ir.struct(struct.structName))
         case ResolvedPointer(valueType) =>
-          new IR.PointerType(transformType(valueType))
+          new IR.PointerType(transformType(valueType, useSnapshot))
         case ResolvedArray(valueType) =>
           throw new TransformerException("Unsupported array type")
         case BoolType => IR.BoolType
@@ -320,6 +369,18 @@ object IRTransformer {
       )
       for (param <- input.declaration.arguments) {
         method.addParameter(transformType(param.valueType), param.name)
+      }
+
+      // declare snapshot function if necessary
+      if (input.declaration.pure) {
+        val snapshotMethod = ir.addMethod(
+          "_old_" ++ input.name,
+          transformReturnType(input.declaration.returnType, useSnapshot = true)
+        )
+        snapshotMethod.pure = true
+        for (param <- input.declaration.arguments) {
+          snapshotMethod.addParameter(transformType(param.valueType, useSnapshot = true), param.name)
+        }
       }
     }
 
@@ -391,6 +452,33 @@ object IRTransformer {
         ops += op
     }
 
+    def implementSnapshotFunction(input: ResolvedMethodDefinition): Unit = {
+      val method = ir.method("_old_" ++ input.name) match {
+        case method: IR.Method => method
+        case method =>
+          throw new TransformerException(s"Invalid method '${method.name}'")
+      }
+      println(s"PURE ${method.name}")
+
+      val scope = new BlockScope(
+        method,
+        method.body,
+        method.parameters.map(p => p.name -> p).toMap
+      )
+
+      method.precondition =
+        input.declaration.precondition.map(transformSpec(_, scope, useSnapshot = true))
+          .orElse(Some(new IR.Imprecise(None)))
+      transformStatement(input.body, scope, useSnapshot = true)
+      method.postcondition =
+        input.declaration.postcondition.map(transformSpec(_, scope, useSnapshot = true))
+          .orElse(Some(new IR.Imprecise(None)))
+
+      ReturnSimplification.transform(method)
+      ReassignmentElimination.transform(method)
+      ParameterAssignmentElimination.transform(method)
+    }
+
     def implementMethod(input: ResolvedMethodDefinition): Unit = {
       val method = ir.method(input.name) match {
         case method: IR.Method => method
@@ -444,7 +532,8 @@ object IRTransformer {
 
     def transformStatement(
         input: ResolvedStatement,
-        scope: MethodScope
+        scope: MethodScope,
+        useSnapshot: Boolean = false
     ): Unit = {
       input match {
         case block: ResolvedBlock => {
@@ -458,28 +547,30 @@ object IRTransformer {
             case _ => throw new TransformerException("Invalid block")
           }
 
-          block.statements.foreach(transformStatement(_, child))
+          block.statements.foreach(transformStatement(_, child, useSnapshot))
         }
 
         case iff: ResolvedIf => {
-          val ir = new IR.If(transformExpr(iff.condition, scope))
+          val ir = new IR.If(transformExpr(iff.condition, scope, RValue(), useSnapshot))
           scope += ir
 
           transformStatement(
             iff.ifTrue,
-            new BlockScope(scope.method, ir.ifTrue, scope.vars)
+            new BlockScope(scope.method, ir.ifTrue, scope.vars),
+            useSnapshot
           )
           iff.ifFalse.foreach(
             transformStatement(
               _,
-              new BlockScope(scope.method, ir.ifFalse, scope.vars)
+              new BlockScope(scope.method, ir.ifFalse, scope.vars),
+              useSnapshot
             )
           )
         }
 
         case loop: ResolvedWhile => {
           val condScope = new CollectorScope(scope)
-          val cond = transformExpr(loop.condition, condScope)
+          val cond = transformExpr(loop.condition, condScope, RValue(), useSnapshot)
           condScope.ops.foreach(scope += _)
 
           val ir =
@@ -490,17 +581,19 @@ object IRTransformer {
           scope += ir
 
           val bodyScope = new BlockScope(scope.method, ir.body, scope.vars)
-          transformStatement(loop.body, bodyScope)
+          transformStatement(loop.body, bodyScope, useSnapshot)
           condScope.ops.foreach(ir.body += _.copy)
         }
 
         case expr: ResolvedExpressionStatement =>
           expr.value match {
-            case invoke: ResolvedInvoke => invokeVoid(invoke, scope)
+            case invoke: ResolvedInvoke => invokeVoid(invoke, scope, useSnapshot)
             case expr =>
               transformExpr(
                 expr,
-                scope
+                scope,
+                RValue(),
+                useSnapshot
               ) // traverse expression and ignore result
           }
 
@@ -511,11 +604,11 @@ object IRTransformer {
                 case ref: ResolvedVariableRef if assign.operation == None =>
                   // Avoid introducing a temp var for the case when the result
                   // is immediately assigned to a var
-                  invokeToVar(invoke, scope.variable(ref), scope)
+                  invokeToVar(invoke, scope.variable(ref), scope, useSnapshot)
                 case complex =>
                   scope += transformAssign(
                     complex,
-                    transformExpr(invoke, scope),
+                    transformExpr(invoke, scope, LValue(), useSnapshot),
                     assign.operation,
                     scope
                   )
@@ -531,7 +624,7 @@ object IRTransformer {
                 case complex =>
                   scope += transformAssign(
                     complex,
-                    transformExpr(alloc, scope),
+                    transformExpr(alloc, scope, LValue(), useSnapshot),
                     assign.operation,
                     scope
                   )
@@ -540,7 +633,7 @@ object IRTransformer {
             case expr =>
               scope += transformAssign(
                 assign.left,
-                transformExpr(expr, scope),
+                transformExpr(expr, scope, RValue(), useSnapshot),
                 assign.operation,
                 scope
               )
@@ -550,7 +643,7 @@ object IRTransformer {
           // In C0, L-values cannot contain methods, which means that the L-value
           // of increment is free of side-effects and can be evaluated multiple times
 
-          val current = transformExpr(inc.value, scope)
+          val current = transformExpr(inc.value, scope, LValue(), useSnapshot)
           val op = inc.operation match {
             case IncrementOperation.Increment => IR.BinaryOp.Add
             case IncrementOperation.Decrement => IR.BinaryOp.Subtract
@@ -561,30 +654,30 @@ object IRTransformer {
         }
 
         case ret: ResolvedReturn =>
-          scope += new IR.Return(ret.value.map(transformExpr(_, scope)))
+          scope += new IR.Return(ret.value.map(transformExpr(_, scope, RValue(), useSnapshot)))
 
         case assert: ResolvedAssert =>
           scope += new IR.Assert(
-            transformExpr(assert.value, scope),
+            transformExpr(assert.value, scope, RValue(), useSnapshot),
             IR.AssertKind.Imperative
           )
 
         case spec: ResolvedAssertSpecification =>
           scope += new IR.Assert(
-            transformSpec(spec.specification, scope),
+            transformSpec(spec.specification, scope, useSnapshot),
             IR.AssertKind.Specification
           )
 
         case unfold: ResolvedUnfoldPredicate =>
           scope += new IR.Unfold(
-            transformPredicate(unfold.predicate, scope)
+            transformPredicate(unfold.predicate, scope, useSnapshot)
           )
 
         case fold: ResolvedFoldPredicate =>
-          scope += new IR.Fold(transformPredicate(fold.predicate, scope))
+          scope += new IR.Fold(transformPredicate(fold.predicate, scope, useSnapshot))
 
         case err: ResolvedError =>
-          scope += new IR.Error(transformExpr(err.value, scope))
+          scope += new IR.Error(transformExpr(err.value, scope, RValue(), useSnapshot))
       }
     }
 
@@ -592,6 +685,10 @@ object IRTransformer {
       val pred = ir.addPredicate(input.name)
       for (param <- input.declaration.arguments)
         pred.addParameter(transformType(param.valueType), param.name)
+
+      val oldPred = ir.addPredicate("_old_" ++ input.name)
+      for (param <- input.declaration.arguments)
+        oldPred.addParameter(transformType(param.valueType, useSnapshot = true), param.name)
     }
 
     class PredicateScope(val predicate: IR.Predicate) extends Scope {
@@ -614,6 +711,10 @@ object IRTransformer {
       val predicate = ir.predicate(input.name)
       val scope = new PredicateScope(predicate)
       predicate.expression = transformSpec(input.body, scope)
+
+      val oldPredicate = ir.predicate("_old_" ++ input.name)
+      val oldScope = new PredicateScope(oldPredicate)
+      oldPredicate.expression = transformSpec(input.body, oldScope, useSnapshot = true)
     }
 
     def not(condition: IR.Expression) =
@@ -629,19 +730,21 @@ object IRTransformer {
 
     def transformExpr(
         input: ResolvedExpression,
-        scope: Scope
+        scope: Scope,
+        ctx: TransformContext,
+        useSnapshot: Boolean = false
     ): IR.Expression = input match {
       case ref: ResolvedVariableRef => scope.variable(ref)
-      case pred: ResolvedPredicate  => transformPredicate(pred, scope)
+      case pred: ResolvedPredicate  => transformPredicate(pred, scope, useSnapshot)
       case invoke: ResolvedInvoke if invoke.method.exists(_.pure)
-                                    => transformFunction(invoke, scope)
-      case invoke: ResolvedInvoke   => invokeToValue(invoke, scope)
+                                    => transformFunction(invoke, scope, useSnapshot)
+      case invoke: ResolvedInvoke   => invokeToValue(invoke, scope, useSnapshot)
       case alloc: ResolvedAlloc     => allocToValue(alloc, scope)
-      case old: ResolvedOld         => new IR.Old(transformExpr(old.body, scope)) // TODO do we need to check scope?
+      case old: ResolvedOld         => new IR.Old(transformExpr(old.body, scope, ctx, useSnapshot)) // TODO do we need to check scope?
 
       case m: ResolvedMember => {
-        val (parent, field) = transformField(m)
-        new IR.FieldMember(transformExpr(parent, scope), field)
+        val (parent, field) = transformField(m, ctx, useSnapshot)
+        new IR.FieldMember(transformExpr(parent, scope, LValue(), useSnapshot), field)
       }
 
       case _: ResolvedArrayIndex | _: ResolvedLength | _: ResolvedAllocArray =>
@@ -655,7 +758,7 @@ object IRTransformer {
         }
 
       case acc: ResolvedAccessibility =>
-        new IR.Accessibility(transformExpr(acc.field, scope) match {
+        new IR.Accessibility(transformExpr(acc.field, scope, LValue(), useSnapshot) match {
           case member: IR.Member => member
           case _                 => throw new TransformerException("Invalid acc() argument")
         })
@@ -664,11 +767,11 @@ object IRTransformer {
         new IR.Imprecise(None)
 
       case cond: ResolvedTernary => {
-        val condition = transformExpr(cond.condition, scope)
+        val condition = transformExpr(cond.condition, scope, RValue(), useSnapshot)
         val ifTrue =
-          transformExpr(cond.ifTrue, conditionalScope(scope, condition))
+          transformExpr(cond.ifTrue, conditionalScope(scope, condition), ctx, useSnapshot)
         val ifFalse =
-          transformExpr(cond.ifFalse, conditionalScope(scope, not(condition)))
+          transformExpr(cond.ifFalse, conditionalScope(scope, not(condition)), ctx, useSnapshot)
         new IR.Conditional(condition, ifTrue, ifFalse)
       }
 
@@ -682,8 +785,8 @@ object IRTransformer {
 
         new IR.Binary(
           op,
-          transformExpr(arith.left, scope),
-          transformExpr(arith.right, scope)
+          transformExpr(arith.left, scope, RValue(), useSnapshot),
+          transformExpr(arith.right, scope, RValue(), useSnapshot)
         )
       }
 
@@ -701,32 +804,32 @@ object IRTransformer {
 
         new IR.Binary(
           op,
-          transformExpr(comp.left, scope),
-          transformExpr(comp.right, scope)
+          transformExpr(comp.left, scope, RValue(), useSnapshot),
+          transformExpr(comp.right, scope, RValue(), useSnapshot)
         )
       }
 
       case logic: ResolvedLogical => {
-        val left = transformExpr(logic.left, scope)
+        val left = transformExpr(logic.left, scope, RValue(), useSnapshot)
         val (op, rightCond) = logic.operation match {
           case LogicalOperation.And => (IR.BinaryOp.And, left)
           case LogicalOperation.Or  => (IR.BinaryOp.Or, not(left))
         }
         val right =
-          transformExpr(logic.right, conditionalScope(scope, rightCond))
+          transformExpr(logic.right, conditionalScope(scope, rightCond), RValue(), useSnapshot)
         new IR.Binary(op, left, right)
       }
 
       case deref: ResolvedDereference => {
-        new IR.DereferenceMember(transformExpr(deref.value, scope))
+        new IR.DereferenceMember(transformExpr(deref.value, scope, LValue(), useSnapshot))
       }
 
       case not: ResolvedNot =>
-        new IR.Unary(IR.UnaryOp.Not, transformExpr(not.value, scope))
+        new IR.Unary(IR.UnaryOp.Not, transformExpr(not.value, scope, RValue(), useSnapshot))
       case negate: ResolvedNegation =>
         new IR.Unary(
           IR.UnaryOp.Negate,
-          transformExpr(negate.value, scope)
+          transformExpr(negate.value, scope, RValue(), useSnapshot)
         )
       case _: ResolvedString =>
         throw new TransformerException("Strings are not supported")
@@ -739,17 +842,18 @@ object IRTransformer {
     // Catches a ? specifier and wraps it in an Imprecise object
     def transformSpec(
         input: ResolvedExpression,
-        scope: Scope
+        scope: Scope,
+        useSnapshot: Boolean = false
     ): IR.Expression = input match {
       case _: ResolvedImprecision => new IR.Imprecise(None)
 
       case logical: ResolvedLogical => {
-        val (left, leftImp) = transformSpec(logical.left, scope) match {
+        val (left, leftImp) = transformSpec(logical.left, scope, useSnapshot) match {
           case imp: IR.Imprecise => (imp.precise, true)
           case other             => (Some(other), false)
         }
 
-        val (right, rightImp) = transformSpec(logical.right, scope) match {
+        val (right, rightImp) = transformSpec(logical.right, scope, useSnapshot) match {
           case imp: IR.Imprecise => (imp.precise, true)
           case other             => (Some(other), false)
         }
@@ -773,7 +877,7 @@ object IRTransformer {
         }
       }
 
-      case other => transformExpr(input, scope)
+      case other => transformExpr(input, scope, RValue(), useSnapshot)
     }
 
     def allocToValue(input: ResolvedAlloc, scope: Scope): IR.Var =
@@ -788,14 +892,14 @@ object IRTransformer {
         case _ => throw new TransformerException("Invalid alloc")
       }
 
-    def invokeToValue(input: ResolvedInvoke, scope: Scope): IR.Var = {
+    def invokeToValue(input: ResolvedInvoke, scope: Scope, useSnapshot: Boolean = false): IR.Var = {
       scope match {
         case scope: MethodScope =>
-          val callee = resolveMethod(input)
+          val callee = resolveMethod(input, useSnapshot)
           val retType = callee.returnType.getOrElse(
             throw new TransformerException("Cannot use result of void method")
           )
-          val args = input.arguments.map(arg => transformExpr(arg, scope))
+          val args = input.arguments.map(arg => transformExpr(arg, scope, Binding(), useSnapshot))
           val temp = scope.method.addVar(retType)
           scope += new IR.Invoke(callee, args, Some(temp))
           temp
@@ -809,53 +913,72 @@ object IRTransformer {
     def invokeToVar(
         input: ResolvedInvoke,
         target: IR.Var,
-        scope: MethodScope
+        scope: MethodScope,
+        useSnapshot: Boolean = false
     ): Unit = {
-      val method = resolveMethod(input)
-      val args = input.arguments.map(arg => transformExpr(arg, scope))
+      val method = resolveMethod(input, useSnapshot)
+      val args = input.arguments.map(arg => transformExpr(arg, scope, Binding(), useSnapshot))
       scope += new IR.Invoke(method, args, Some(target))
     }
 
-    def invokeVoid(input: ResolvedInvoke, scope: MethodScope): Unit = {
-      val method = resolveMethod(input)
-      val args = input.arguments.map(arg => transformExpr(arg, scope))
+    def invokeVoid(input: ResolvedInvoke, scope: MethodScope, useSnapshot: Boolean = false): Unit = {
+      val method = resolveMethod(input, useSnapshot)
+      val args = input.arguments.map(arg => transformExpr(arg, scope, Binding(), useSnapshot))
       // Add a variable to capture the result, even when it is not used. (The
       // [conditions of] Viper run-time checks may reference it.)
       val target = method.returnType.map(t => scope.method.addVar(t))
       scope += new IR.Invoke(method, args, target)
     }
 
-    def resolveMethod(invoke: ResolvedInvoke): IR.MethodDefinition =
-      invoke.method
-        .map(m => ir.method(m.name))
-        .getOrElse(throw new TransformerException("Invalid invoke"))
+    def resolveMethod(invoke: ResolvedInvoke, useSnapshot: Boolean = false): IR.MethodDefinition = {
+      if (useSnapshot) {
+        invoke.method
+          .map(m => ir.method("_old_" ++ m.name))
+          .getOrElse(throw new TransformerException("Invalid invoke"))
+      } else {
+        invoke.method
+          .map(m => ir.method(m.name))
+          .getOrElse(throw new TransformerException("Invalid invoke"))
+      }
+    }
 
-    def resolvePredicate(pred: ResolvedPredicate): IR.Predicate =
-      pred.predicate
-        .map(p => ir.predicate(p.name))
-        .getOrElse(
-          throw new TransformerException("Invalid predicate reference")
-        )
+    def resolvePredicate(pred: ResolvedPredicate,
+                         useSnapshot: Boolean = false): IR.Predicate = {
+      if (useSnapshot) {
+        pred.predicate
+          .map(p => ir.predicate("_old_" ++ p.name))
+          .getOrElse(
+            throw new TransformerException("Invalid predicate reference")
+          )
+      } else {
+        pred.predicate
+          .map(p => ir.predicate(p.name))
+          .getOrElse(
+            throw new TransformerException("Invalid predicate reference")
+          )
+      }
+    }
 
     def transformFunction(
         invoke: ResolvedInvoke,
-        scope: Scope
+        scope: Scope,
+        useSnapshot: Boolean = false
     ): IR.FunctionApplication = {
-      val method = resolveMethod(invoke)
-      if (!method.isPure) throw new TransformerException("Impure function called where pure function expected")
+      val method = resolveMethod(invoke, useSnapshot)
       new IR.FunctionApplication(
         method,
-        invoke.arguments.map(transformExpr(_, scope))
+        invoke.arguments.map(transformExpr(_, scope, Binding(), useSnapshot))
       )
     }
 
     def transformPredicate(
         pred: ResolvedPredicate,
-        scope: Scope
+        scope: Scope,
+        useSnapshot: Boolean = false
     ): IR.PredicateInstance =
       new IR.PredicateInstance(
-        resolvePredicate(pred),
-        pred.arguments.map(transformExpr(_, scope))
+        resolvePredicate(pred, useSnapshot),
+        pred.arguments.map(transformExpr(_, scope, Binding(), useSnapshot))
       )
 
     def transformAssign(
@@ -871,9 +994,9 @@ object IRTransformer {
         }
 
         case member: ResolvedMember => {
-          val (parent, field) = transformField(member)
+          val (parent, field) = transformField(member, LValue())
           val target =
-            new IR.FieldMember(transformExpr(parent, scope), field)
+            new IR.FieldMember(transformExpr(parent, scope, LValue()), field)
           new IR.AssignMember(
             target,
             transformAssignValue(value, target, op)
@@ -882,7 +1005,7 @@ object IRTransformer {
 
         case deref: ResolvedDereference =>
           val target =
-            new IR.DereferenceMember(transformExpr(deref.value, scope))
+            new IR.DereferenceMember(transformExpr(deref.value, scope, LValue()))
           new IR.AssignMember(
             target,
             transformAssignValue(value, target, op)
